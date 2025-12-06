@@ -2,8 +2,9 @@ import express from "express";
 import mongoose from "mongoose";
 import dotenv from "dotenv";
 import cors from "cors";
+import helmet from "helmet";
+import morgan from "morgan";
 import websiteContactRouter from "./routes/websiteContactRoutes.js";
-
 
 dotenv.config();
 
@@ -11,13 +12,17 @@ const app = express();
 
 // 1. Middleware
 // CORS is critical: It allows websites hosted elsewhere to send data to this server
-app.use(cors({
-  origin: "*", // Allow all origins (easiest for generated sites)
-  methods: ["POST", "GET"],
-  credentials: true
-}));
+app.use(
+  cors({
+    origin: "*", // Allow all origins (easiest for generated sites)
+    methods: ["POST", "GET"],
+    credentials: true,
+  })
+);
 
 app.use(express.json()); // Parse JSON bodies
+app.use(helmet());
+app.use(morgan("dev"));
 
 // 2. Database Connection
 mongoose
