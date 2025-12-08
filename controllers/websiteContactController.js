@@ -2,15 +2,17 @@ import ContactSubmission from "../models/contactSubmission.js";
 import { sendWhatsAppMessage } from "../services/whatsappService.js";
 import { sendToEmail } from "../utils/sendEmail.js";
 
-
 export const submitContactForm = async (req, res) => {
   console.log("🔹 [Controller] Contact form submission received.");
-  
+
   try {
     const { fullName, email, phone, subject, message, ownerDetails } = req.body;
 
     // Log raw body for debugging
-    console.log("🔹 [Controller] Request Body:", JSON.stringify(req.body, null, 2));
+    console.log(
+      "🔹 [Controller] Request Body:",
+      JSON.stringify(req.body, null, 2)
+    );
 
     const businessOwnerEmail = ownerDetails?.email;
     const businessOwnerPhone = ownerDetails?.phone;
@@ -24,71 +26,85 @@ export const submitContactForm = async (req, res) => {
       });
     }
 
-    console.log(`🔹 [Controller] Owner Email: ${businessOwnerEmail}`);
-    console.log(`🔹 [Controller] Owner Phone: ${businessOwnerPhone || "Not Provided"}`);
-
     // --- 1. EMAIL LOGIC ---
-    const emailSubject = `New Website Inquiry: ${subject || "General Contact"}`;
-    const emailHtml = `
-      <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; max-width: 600px;">
-        <h2 style="color: #0056b3;">New Message from your Website</h2>
-        <p><strong>Name:</strong> ${fullName}</p>
-        <p><strong>Email:</strong> ${email}</p>
-        <p><strong>Phone:</strong> ${phone || "N/A"}</p>
-        <p><strong>Subject:</strong> ${subject || "N/A"}</p>
-        <br />
-        <p><strong>Message:</strong></p>
-        <blockquote style="background: #f9f9f9; padding: 15px; border-left: 5px solid #0056b3;">
-          ${message.replace(/\n/g, "<br>")}
-        </blockquote>
-        <hr />
-        <p style="font-size: 12px; color: #777;">
-          Sent to business email: ${businessOwnerEmail}
-        </p>
-      </div>
-    `;
+    let isEmailSent = false;
 
-    const emailText = `Name: ${fullName}\nEmail: ${email}\nSubject: ${subject}\nMessage:\n${message}`;
+    // Uncomment this to enable email
+    /* try {
+        console.log("🔹 [Controller] Sending Email...");
+        isEmailSent = await sendToEmail({
+            to: businessOwnerEmail,
+            subject: `New Website Inquiry: ${subject || "General Contact"}`,
+            html: `<p>Name: ${fullName}</p><p>Message: ${message}</p>`, // Simplified for brevity
+            text: `Name: ${fullName}\nMessage: ${message}`
+        });
+    } catch (e) {
+        console.error("Email Error", e);
+    }
+    */
 
-    console.log("🔹 [Controller] Sending Email...");
-    // const isEmailSent = await sendToEmail({
-    //   to: businessOwnerEmail,
-    //   subject: emailSubject,
-    //   html: emailHtml,
-    //   text: emailText,
-    // });
-    const isEmailSent = true;
-    console.log(`🔹 [Controller] Email Status: ${isEmailSent ? "SENT" : "FAILED"}`);
+    // FOR TESTING WHATSAPP ONLY: Keep this false for now
+    // isEmailSent = false;
+
+    console.log(
+      `🔹 [Controller] Email Status: ${isEmailSent ? "SENT" : "SKIPPED/FAILED"}`
+    );
 
     // --- 2. WHATSAPP LOGIC 🟢 ---
     let isWhatsAppSent = false;
+    let templateUsed = "none";
 
     if (businessOwnerPhone) {
-      console.log("🔹 [Controller] Attempting WhatsApp notification...");
+      console.log("🔹 [Controller] Processing WhatsApp...");
 
-      // Prepare the 5 variables strictly
+      // 1. Sanitize the phone number to match DB records (remove non-digits)
+      const formattedOwnerPhone = String(businessOwnerPhone).replace(/\D/g, "");
+
+      // 2. CHECK HISTORY: Has this number successfully received a message before?
+      const existingHistory = await ContactSubmission.findOne({
+        ownerPhone: formattedOwnerPhone,
+        whatsappStatus: "SENT", // Only counts if it was actually delivered/sent previously
+      });
+
+      // 3. DECIDE TEMPLATE
+      // If history exists -> Use Normal Template
+      // If NO history -> Use "Hii" Button Template
+      const templateName = existingHistory
+        ? "new_website_lead" // Standard template
+        : "new_website_lead_hii"; // Template with "Hii" Button
+
+      templateUsed = templateName;
+      console.log(
+        `🔹 [Controller] User Status: ${existingHistory ? "Returning" : "New"}`
+      );
+      console.log(`🔹 [Controller] Selected Template: ${templateName}`);
+
       const templateVars = [
-        fullName,                   // {{1}}
-        email,                      // {{2}}
-        phone || "N/A",             // {{3}}
-        subject || "General Inquiry",// {{4}}
-        message.substring(0, 100)   // {{5}} Limit to 100 chars to be safe
+        fullName,
+        email,
+        phone || "N/A",
+        subject || "General Inquiry",
+        message.substring(0, 100),
       ];
 
-      // Corrected Function Call: Passing an OBJECT
       isWhatsAppSent = await sendWhatsAppMessage({
-        to: businessOwnerPhone,
-        templateName: "new_website_lead",
+        to: formattedOwnerPhone,
+        templateName: templateName,
         bodyParameters: templateVars,
-        languageCode: "en" // Change to "en_US" or "en_GB" if your template differs
+        languageCode: "en",
       });
-      
-      console.log(`🔹 [Controller] WhatsApp Status: ${isWhatsAppSent ? "SENT" : "FAILED"}`);
+
+      console.log(
+        `🔹 [Controller] WhatsApp Status: ${isWhatsAppSent ? "SENT" : "FAILED"}`
+      );
     } else {
-      console.log("⚠️ [Controller] No owner phone number provided, skipping WhatsApp.");
+      console.log(
+        "⚠️ [Controller] No owner phone number provided, skipping WhatsApp."
+      );
     }
 
     // --- 3. DATABASE LOGIC ---
+    // We save the normalized ownerPhone so future checks work correctly
     try {
       await ContactSubmission.create({
         fullName,
@@ -97,6 +113,9 @@ export const submitContactForm = async (req, res) => {
         subject: subject || "General Contact",
         message,
         ownerEmail: businessOwnerEmail,
+        ownerPhone: businessOwnerPhone
+          ? String(businessOwnerPhone).replace(/\D/g, "")
+          : "",
         emailStatus: isEmailSent ? "SENT" : "FAILED",
         whatsappStatus: isWhatsAppSent ? "SENT" : "FAILED",
       });
@@ -105,17 +124,23 @@ export const submitContactForm = async (req, res) => {
       console.error("❌ [Controller] Failed to save to DB:", dbError);
     }
 
-    if (!isEmailSent) {
+    // --- 4. RESPONSE ---
+    if (isEmailSent || isWhatsAppSent) {
+      return res.status(200).json({
+        success: true,
+        message: "Message processed successfully!",
+        debug: {
+          email: isEmailSent,
+          whatsapp: isWhatsAppSent,
+          template: templateUsed,
+        },
+      });
+    } else {
       return res.status(500).json({
         success: false,
-        message: "Failed to send email. Please try again later.",
+        message: "Failed to deliver message via Email or WhatsApp.",
       });
     }
-
-    return res.status(200).json({
-      success: true,
-      message: "Message sent successfully!",
-    });
   } catch (error) {
     console.error("❌ [Controller] Critical Error:", error);
     return res.status(500).json({
