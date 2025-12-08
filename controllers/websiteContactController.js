@@ -57,7 +57,7 @@ export const submitContactForm = async (req, res) => {
     //   html: emailHtml,
     //   text: emailText,
     // });
-    const isEmailSent = false;
+    const isEmailSent = true;
     console.log(`🔹 [Controller] Email Status: ${isEmailSent ? "SENT" : "FAILED"}`);
 
     // --- 2. WHATSAPP LOGIC 🟢 ---
@@ -80,7 +80,7 @@ export const submitContactForm = async (req, res) => {
         to: businessOwnerPhone,
         templateName: "new_website_lead",
         bodyParameters: templateVars,
-        languageCode: "en_US" // Change to "en" or "en_GB" if your template differs
+        languageCode: "en" // Change to "en_US" or "en_GB" if your template differs
       });
       
       console.log(`🔹 [Controller] WhatsApp Status: ${isWhatsAppSent ? "SENT" : "FAILED"}`);
