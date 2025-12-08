@@ -1,48 +1,37 @@
-// controller/websiteContactController.js
 import ContactSubmission from "../models/contactSubmission.js";
+import { sendWhatsAppMessage } from "../services/whatsappService.js";
 import { sendToEmail } from "../utils/sendEmail.js";
 
 
-
 export const submitContactForm = async (req, res) => {
+  console.log("🔹 [Controller] Contact form submission received.");
+  
   try {
-    // 1. Destructure the incoming data based on the new structure
-    const {
-      fullName,
-      email, // The visitor's email
-      phone,
-      subject,
-      message,
-      ownerDetails, // The object containing { phone, email, address... }
-    } = req.body;
+    const { fullName, email, phone, subject, message, ownerDetails } = req.body;
 
-    // 2. Extract the business owner's email from the object
+    // Log raw body for debugging
+    console.log("🔹 [Controller] Request Body:", JSON.stringify(req.body, null, 2));
+
     const businessOwnerEmail = ownerDetails?.email;
+    const businessOwnerPhone = ownerDetails?.phone;
 
-    // 3. Validation
+    // Validation
     if (!fullName || !email || !message || !businessOwnerEmail) {
-      console.warn("[Contact Form] Validation Failed. Missing fields.");
+      console.warn("⚠️ [Controller] Validation Failed. Missing fields.");
       return res.status(400).json({
         success: false,
-        message:
-          "Missing required fields. Ensure Name, Email, Message, and Owner Details are present.",
+        message: "Missing required fields.",
       });
     }
 
-    console.log(
-      `[Contact Form] Processing message for Business Owner: ${businessOwnerEmail}`
-    );
-    console.log(`[Contact Form] From Visitor: ${fullName} (${email})`);
+    console.log(`🔹 [Controller] Owner Email: ${businessOwnerEmail}`);
+    console.log(`🔹 [Controller] Owner Phone: ${businessOwnerPhone || "Not Provided"}`);
 
-    // 4. Construct Email Content
+    // --- 1. EMAIL LOGIC ---
     const emailSubject = `New Website Inquiry: ${subject || "General Contact"}`;
-
-    // HTML Body
     const emailHtml = `
       <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; max-width: 600px;">
         <h2 style="color: #0056b3;">New Message from your Website</h2>
-        <p><strong>You have received a new inquiry via your contact form.</strong></p>
-        <hr />
         <p><strong>Name:</strong> ${fullName}</p>
         <p><strong>Email:</strong> ${email}</p>
         <p><strong>Phone:</strong> ${phone || "N/A"}</p>
@@ -54,65 +43,81 @@ export const submitContactForm = async (req, res) => {
         </blockquote>
         <hr />
         <p style="font-size: 12px; color: #777;">
-          Sent to business email: ${businessOwnerEmail}<br>
-          Business Phone: ${ownerDetails.phone || "N/A"}
+          Sent to business email: ${businessOwnerEmail}
         </p>
       </div>
     `;
 
-    // Plain Text Body (Fallback)
-    const emailText = `
-      New Website Inquiry: ${subject || "General Contact"}
-      -----------------------------------------------
-      Name: ${fullName}
-      Email: ${email}
-      Phone: ${phone || "N/A"}
+    const emailText = `Name: ${fullName}\nEmail: ${email}\nSubject: ${subject}\nMessage:\n${message}`;
+
+    console.log("🔹 [Controller] Sending Email...");
+    // const isEmailSent = await sendToEmail({
+    //   to: businessOwnerEmail,
+    //   subject: emailSubject,
+    //   html: emailHtml,
+    //   text: emailText,
+    // });
+    const isEmailSent = false;
+    console.log(`🔹 [Controller] Email Status: ${isEmailSent ? "SENT" : "FAILED"}`);
+
+    // --- 2. WHATSAPP LOGIC 🟢 ---
+    let isWhatsAppSent = false;
+
+    if (businessOwnerPhone) {
+      console.log("🔹 [Controller] Attempting WhatsApp notification...");
+
+      // Prepare the 5 variables strictly
+      const templateVars = [
+        fullName,                   // {{1}}
+        email,                      // {{2}}
+        phone || "N/A",             // {{3}}
+        subject || "General Inquiry",// {{4}}
+        message.substring(0, 100)   // {{5}} Limit to 100 chars to be safe
+      ];
+
+      // Corrected Function Call: Passing an OBJECT
+      isWhatsAppSent = await sendWhatsAppMessage({
+        to: businessOwnerPhone,
+        templateName: "new_website_lead",
+        bodyParameters: templateVars,
+        languageCode: "en_US" // Change to "en" or "en_GB" if your template differs
+      });
       
-      Message:
-      ${message}
-    `;
+      console.log(`🔹 [Controller] WhatsApp Status: ${isWhatsAppSent ? "SENT" : "FAILED"}`);
+    } else {
+      console.log("⚠️ [Controller] No owner phone number provided, skipping WhatsApp.");
+    }
 
-    // 5. Send Email using Nodemailer
-    const isSent = await sendToEmail({
-      to: businessOwnerEmail,
-      subject: emailSubject,
-      html: emailHtml,
-      text: emailText,
-    });
-
-    // 6. SAVE TO DATABASE 💾
-    // We save regardless of whether the email failed or succeeded,
-    // so we have a record of the attempt.
+    // --- 3. DATABASE LOGIC ---
     try {
       await ContactSubmission.create({
         fullName,
-        visitorEmail: email, // Mapping 'email' from body to 'visitorEmail' in schema
+        visitorEmail: email,
         phone: phone || "",
         subject: subject || "General Contact",
         message,
         ownerEmail: businessOwnerEmail,
-        emailStatus: isSent ? "SENT" : "FAILED", // 👈 Saves the status
+        emailStatus: isEmailSent ? "SENT" : "FAILED",
+        whatsappStatus: isWhatsAppSent ? "SENT" : "FAILED",
       });
-      console.log("✅ Contact submission saved to DB");
+      console.log("✅ [Controller] Contact submission saved to DB");
     } catch (dbError) {
-      console.error("❌ Failed to save contact submission to DB:", dbError);
-      // We don't return here because if email was sent, we still want to tell the user success
+      console.error("❌ [Controller] Failed to save to DB:", dbError);
     }
 
-    if (!isSent) {
+    if (!isEmailSent) {
       return res.status(500).json({
         success: false,
         message: "Failed to send email. Please try again later.",
       });
     }
 
-    // 6. Return Success Response
     return res.status(200).json({
       success: true,
       message: "Message sent successfully!",
     });
   } catch (error) {
-    console.error("Error in submitContactForm:", error);
+    console.error("❌ [Controller] Critical Error:", error);
     return res.status(500).json({
       success: false,
       message: "Server error processing contact form.",
