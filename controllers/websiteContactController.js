@@ -1,6 +1,6 @@
 import ContactSubmission from "../models/contactSubmission.js";
 import { sendWhatsAppMessage } from "../services/whatsappService.js";
-import { sendToEmail } from "../utils/sendEmail.js";
+// import { sendToEmail } from "../utils/sendEmail.js"; 
 
 import Project from "../models/project.js";
 import Intake from "../models/qa.js";
@@ -20,94 +20,137 @@ export const submitContactForm = async (req, res) => {
     } = req.body;
 
     // Log raw body for debugging
-    console.log(
-      "🔹 [Controller] Request Body:",
-      JSON.stringify(req.body, null, 2)
-    );
+    console.log("🔹 [Controller] Request Body:", JSON.stringify(req.body, null, 2));
+
+    // Validation
+    if (!fullName || !email || !message) {
+      return res.status(400).json({ success: false, message: "Missing required fields." });
+    }
 
     // ---------------------------------------------------------
-    // 🆕 NEW FUNCTIONALITY: Fetch Project & Extract Intake Data
+    // 1️⃣ COLLECT RECIPIENTS (Owner + Intake Staff)
     // ---------------------------------------------------------
-    let extractedOwnerName = null;
+    
+    // Use a Map to ensure unique phone numbers (Key: Phone, Value: Role)
+    const recipientMap = new Map();
+
+    // A. Add Main Business Owner (from frontend payload)
+    if (ownerDetails?.phone) {
+      const cleanOwnerPhone = String(ownerDetails.phone).replace(/\D/g, "");
+      if (cleanOwnerPhone.length >= 10) {
+        recipientMap.set(cleanOwnerPhone, "Business Owner");
+      }
+    }
+
+    // B. Parse Intake for Sales/Telecallers
     if (projectId) {
       try {
-        console.log(
-          `🔹 [Controller] Fetching Project Data for ID: ${projectId}`
-        );
         const project = await Project.findById(projectId);
-
-        if (project && project.latestIntake) {
+        if (project?.latestIntake) {
           const intake = await Intake.findById(project.latestIntake);
+          if (intake?.formData) {
+            // Exact question string from your intake form
+            const targetQuestion = "What are the names of the partners, and what roles do they play?";
+            const rawString = intake.formData[targetQuestion];
 
-          if (intake && intake.formData) {
-            // Target specific field from Intake
-            const partnersRaw =
-              intake.formData[
-                "What are the names of the partners, and what roles do they play?"
-              ];
+            if (rawString && typeof rawString === "string") {
+              console.log(`🔹 [Controller] Parsing Intake String: "${rawString}"`);
+              
+              // Split by comma and TRIM whitespace
+              const peopleEntries = rawString.split(",").map(s => s.trim());
 
-            if (partnersRaw && typeof partnersRaw === "string") {
-              // Parsing Logic
-              const intakeTeam = partnersRaw.split(/,|and/).map((p) => {
-                const parts = p.trim().split(/[-:]/);
-                // heuristic: if parts[0] looks like a role (ceo, cto), swap them
-                let role = parts[0]?.trim();
-                let name = parts[1]?.trim();
+              peopleEntries.forEach(entry => {
+                // 1. Extract Phone using Regex: looks for digits inside parentheses (999)
+                const phoneMatch = entry.match(/\((\d+)\)/);
+                const extractedPhone = phoneMatch ? phoneMatch[1] : null;
 
-                // Check if user typed "ceo-amit" (role first) or "amit-ceo" (name first)
-                const commonRoles = [
-                  "ceo",
-                  "cto",
-                  "founder",
-                  "owner",
-                  "manager",
-                  "partner",
-                ];
-                if (commonRoles.includes(name?.toLowerCase())) {
-                  let temp = name;
-                  name = role;
-                  role = temp;
+                if (extractedPhone) {
+                  // 2. Extract Name/Role string (remove the phone part)
+                  const textPart = entry.replace(/\(\d+\)/, "").toLowerCase().trim();
+                  
+                  // 3. Check for keywords
+                  if (textPart.includes("sales") || textPart.includes("telecaller") || textPart.includes("tellecaller")) {
+                     // Add to map (Using phone as key prevents duplicates)
+                     recipientMap.set(extractedPhone, "Staff (Sales/Telecaller)");
+                     console.log(`🔹 [Controller] Found Staff: ${textPart} -> ${extractedPhone}`);
+                  }
                 }
-                if (!name && role) {
-                  name = role;
-                  role = "Co-Founder";
-                } // Fallback
-
-                return { name: name || "Partner", role: role || "Co-Founder" };
               });
-
-              if (intakeTeam.length > 0) {
-                extractedOwnerName = intakeTeam[0].name;
-                console.log(
-                  `🔹 [Controller] Extracted Owner Name from Intake: ${extractedOwnerName}`
-                );
-              }
             }
           }
         }
       } catch (err) {
-        console.warn(
-          "⚠️ [Controller] Failed to fetch Project/Intake data:",
-          err.message
-        );
-        // Continue execution, do not fail request
+        console.warn("⚠️ [Controller] Intake Fetch Error:", err.message);
       }
     }
+
     // ---------------------------------------------------------
+    // 2️⃣ WHATSAPP LOOP (Send to all unique recipients)
+    // ---------------------------------------------------------
+    
+    const whatsappResults = [];
+    let isAnyWhatsAppSent = false;
 
-    const businessOwnerEmail = ownerDetails?.email;
-    const businessOwnerPhone = ownerDetails?.phone;
+    // Iterate over unique phone numbers
+    for (const [targetPhone, role] of recipientMap) {
+      console.log(`\n🔄 Processing WhatsApp for: ${role} (${targetPhone})`);
 
-    // Validation
-    if (!fullName || !email || !message || !businessOwnerEmail) {
-      console.warn("⚠️ [Controller] Validation Failed. Missing fields.");
-      return res.status(400).json({
-        success: false,
-        message: "Missing required fields.",
+      // A. CHECK HISTORY FOR THIS SPECIFIC NUMBER
+      // We check if we have ever successfully SENT a message to THIS number
+      const history = await ContactSubmission.findOne({
+        ownerPhone: targetPhone, 
+        whatsappStatus: "SENT"
       });
+
+      // B. SELECT TEMPLATE
+      // Existing history -> Normal Template
+      // No history -> Hii Button Template
+      const templateName = history ? "new_website_lead" : "new_website_lead_hii";
+      console.log(`   👉 Status: ${history ? "Returning" : "First Time"} | Template: ${templateName}`);
+
+      // C. PREPARE VARIABLES
+      // Note: Both templates must accept the SAME number of variables (5) in your Meta config
+      const templateVars = [
+        fullName,
+        email,
+        phone || "N/A",
+        subject || "General Inquiry",
+        message.substring(0, 100),
+      ];
+
+      // D. SEND MESSAGE
+      const isSent = await sendWhatsAppMessage({
+        to: targetPhone,
+        templateName: templateName,
+        bodyParameters: templateVars,
+        languageCode: "en",
+      });
+
+      if (isSent) isAnyWhatsAppSent = true;
+      whatsappResults.push({ phone: targetPhone, status: isSent ? "SENT" : "FAILED", template: templateName });
+
+      // E. SAVE INDIVIDUAL DB RECORD (Crucial for History tracking)
+      // We save a record for EACH person so the "First Time" check works correctly for them next time.
+      try {
+        await ContactSubmission.create({
+          fullName,
+          visitorEmail: email,
+          phone: phone || "",
+          subject: subject || "General Contact",
+          message,
+          ownerEmail: ownerDetails?.email || "staff-notification", // Fallback if just staff
+          ownerPhone: targetPhone, // <--- This is the key field for history checks
+          emailStatus: "SKIPPED", // We only send email to main owner once (handled below)
+          whatsappStatus: isSent ? "SENT" : "FAILED",
+        });
+      } catch (dbErr) {
+        console.error("   ❌ DB Save Failed:", dbErr.message);
+      }
     }
 
-    // --- 1. EMAIL LOGIC ---
+    // ---------------------------------------------------------
+    // 3️⃣ EMAIL LOGIC (Send only ONCE to the Main Business Email)
+    // ---------------------------------------------------------
     let isEmailSent = false;
 
     // Uncomment this to enable email
@@ -127,101 +170,30 @@ export const submitContactForm = async (req, res) => {
     // FOR TESTING WHATSAPP ONLY: Keep this false for now
     // isEmailSent = false;
 
-    console.log(
-      `🔹 [Controller] Email Status: ${isEmailSent ? "SENT" : "SKIPPED/FAILED"}`
-    );
+    console.log(`🔹 [Controller] Email Logic Skipped (Disabled)`);
 
-    // --- 2. WHATSAPP LOGIC 🟢 ---
-    let isWhatsAppSent = false;
-    let templateUsed = "none";
-
-    if (businessOwnerPhone) {
-      console.log("🔹 [Controller] Processing WhatsApp...");
-
-      // 1. Sanitize the phone number to match DB records (remove non-digits)
-      const formattedOwnerPhone = String(businessOwnerPhone).replace(/\D/g, "");
-
-      // 2. CHECK HISTORY: Has this number successfully received a message before?
-      const existingHistory = await ContactSubmission.findOne({
-        ownerPhone: formattedOwnerPhone,
-        whatsappStatus: "SENT", // Only counts if it was actually delivered/sent previously
-      });
-
-      // 3. DECIDE TEMPLATE
-      // If history exists -> Use Normal Template
-      // If NO history -> Use "Hii" Button Template
-      const templateName = existingHistory
-        ? "new_website_lead" // Standard template
-        : "new_website_lead_hii"; // Template with "Hii" Button
-
-      templateUsed = templateName;
-      console.log(
-        `🔹 [Controller] User Status: ${existingHistory ? "Returning" : "New"}`
-      );
-      console.log(`🔹 [Controller] Selected Template: ${templateName}`);
-
-      const templateVars = [
-        fullName,
-        email,
-        phone || "N/A",
-        subject || "General Inquiry",
-        message.substring(0, 100),
-      ];
-
-      isWhatsAppSent = await sendWhatsAppMessage({
-        to: formattedOwnerPhone,
-        templateName: templateName,
-        bodyParameters: templateVars,
-        languageCode: "en",
-      });
-
-      console.log(
-        `🔹 [Controller] WhatsApp Status: ${isWhatsAppSent ? "SENT" : "FAILED"}`
-      );
-    } else {
-      console.log(
-        "⚠️ [Controller] No owner phone number provided, skipping WhatsApp."
-      );
-    }
-
-    // --- 3. DATABASE LOGIC ---
-    // We save the normalized ownerPhone so future checks work correctly
-    try {
-      await ContactSubmission.create({
-        fullName,
-        visitorEmail: email,
-        phone: phone || "",
-        subject: subject || "General Contact",
-        message,
-        ownerEmail: businessOwnerEmail,
-        ownerPhone: businessOwnerPhone
-          ? String(businessOwnerPhone).replace(/\D/g, "")
-          : "",
-        emailStatus: isEmailSent ? "SENT" : "FAILED",
-        whatsappStatus: isWhatsAppSent ? "SENT" : "FAILED",
-      });
-      console.log("✅ [Controller] Contact submission saved to DB");
-    } catch (dbError) {
-      console.error("❌ [Controller] Failed to save to DB:", dbError);
-    }
-
-    // --- 4. RESPONSE ---
-    if (isEmailSent || isWhatsAppSent) {
+    // ---------------------------------------------------------
+    // 4️⃣ FINAL RESPONSE
+    // ---------------------------------------------------------
+    
+    if (isAnyWhatsAppSent || isEmailSent) {
       return res.status(200).json({
         success: true,
-        message: "Message processed successfully!",
-        debug: {
-          email: isEmailSent,
-          whatsapp: isWhatsAppSent,
-          template: templateUsed,
-        },
+        message: "Notifications processed.",
+        results: {
+          whatsapp: whatsappResults,
+          email: isEmailSent ? "SENT" : "SKIPPED"
+        }
       });
     } else {
+      // Only fail if EVERYTHING failed
       return res.status(500).json({
         success: false,
-        message: "Failed to deliver message via Email or WhatsApp.",
+        message: "Failed to deliver any notifications.",
+        results: whatsappResults
       });
     }
+
   } catch (error) {
     console.error("❌ [Controller] Critical Error:", error);
     return res.status(500).json({
