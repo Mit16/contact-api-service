@@ -2,17 +2,98 @@ import ContactSubmission from "../models/contactSubmission.js";
 import { sendWhatsAppMessage } from "../services/whatsappService.js";
 import { sendToEmail } from "../utils/sendEmail.js";
 
+import Project from "../models/project.js";
+import Intake from "../models/qa.js";
+
 export const submitContactForm = async (req, res) => {
   console.log("🔹 [Controller] Contact form submission received.");
 
   try {
-    const { fullName, email, phone, subject, message, ownerDetails } = req.body;
+    const {
+      fullName,
+      email,
+      phone,
+      subject,
+      message,
+      ownerDetails,
+      projectId,
+    } = req.body;
 
     // Log raw body for debugging
     console.log(
       "🔹 [Controller] Request Body:",
       JSON.stringify(req.body, null, 2)
     );
+
+    // ---------------------------------------------------------
+    // 🆕 NEW FUNCTIONALITY: Fetch Project & Extract Intake Data
+    // ---------------------------------------------------------
+    let extractedOwnerName = null;
+    if (projectId) {
+      try {
+        console.log(
+          `🔹 [Controller] Fetching Project Data for ID: ${projectId}`
+        );
+        const project = await Project.findById(projectId);
+
+        if (project && project.latestIntake) {
+          const intake = await Intake.findById(project.latestIntake);
+
+          if (intake && intake.formData) {
+            // Target specific field from Intake
+            const partnersRaw =
+              intake.formData[
+                "What are the names of the partners, and what roles do they play?"
+              ];
+
+            if (partnersRaw && typeof partnersRaw === "string") {
+              // Parsing Logic
+              const intakeTeam = partnersRaw.split(/,|and/).map((p) => {
+                const parts = p.trim().split(/[-:]/);
+                // heuristic: if parts[0] looks like a role (ceo, cto), swap them
+                let role = parts[0]?.trim();
+                let name = parts[1]?.trim();
+
+                // Check if user typed "ceo-amit" (role first) or "amit-ceo" (name first)
+                const commonRoles = [
+                  "ceo",
+                  "cto",
+                  "founder",
+                  "owner",
+                  "manager",
+                  "partner",
+                ];
+                if (commonRoles.includes(name?.toLowerCase())) {
+                  let temp = name;
+                  name = role;
+                  role = temp;
+                }
+                if (!name && role) {
+                  name = role;
+                  role = "Co-Founder";
+                } // Fallback
+
+                return { name: name || "Partner", role: role || "Co-Founder" };
+              });
+
+              if (intakeTeam.length > 0) {
+                extractedOwnerName = intakeTeam[0].name;
+                console.log(
+                  `🔹 [Controller] Extracted Owner Name from Intake: ${extractedOwnerName}`
+                );
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(
+          "⚠️ [Controller] Failed to fetch Project/Intake data:",
+          err.message
+        );
+        // Continue execution, do not fail request
+      }
+    }
+    // ---------------------------------------------------------
 
     const businessOwnerEmail = ownerDetails?.email;
     const businessOwnerPhone = ownerDetails?.phone;
