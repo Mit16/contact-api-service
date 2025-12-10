@@ -2,8 +2,13 @@ import Project from "../models/project.js";
 import Intake from "../models/qa.js";
 import ContactSubmission from "../models/contactSubmission.js";
 import { sendWhatsAppMessage } from "../services/whatsappService.js";
-import { createTicket } from "../services/queryService.js";
-// import { sendToEmail } from "../utils/sendEmail.js";
+// 👇 IMPORTED CORRECTLY
+import {
+  createTicket,
+  createSubmissionLog,
+  updateNotificationStatus,
+} from "../services/queryService.js";
+// import { sendToEmail } from "../utils/emailService.js";
 
 /**
  * HELPER: Extracts Owner + Staff recipients from Project/Intake
@@ -11,10 +16,14 @@ import { createTicket } from "../services/queryService.js";
 const getRecipients = async (ownerDetails, projectId) => {
   const recipientMap = new Map();
 
-  // 1. Add Owner
+  // 1. Add Owner (Primary)
   if (ownerDetails?.phone) {
     const cleanPhone = String(ownerDetails.phone).replace(/\D/g, "");
-    if (cleanPhone.length >= 10) recipientMap.set(cleanPhone, "Business Owner");
+    if (cleanPhone.length >= 10)
+      recipientMap.set(cleanPhone, {
+        role: "Business Owner",
+        email: ownerDetails.email,
+      });
   }
 
   // 2. Parse Intake for Staff
@@ -30,20 +39,28 @@ const getRecipients = async (ownerDetails, projectId) => {
 
         if (typeof rawString === "string") {
           console.log(`🔹 [Helper] Parsing Intake: "${rawString}"`);
-          rawString.split(",").forEach((entry) => {
-            const phoneMatch = entry.match(/\((\d+)\)/);
-            if (phoneMatch) {
-              const phone = phoneMatch[1];
-              const roleText = entry.replace(/\(\d+\)/, "").toLowerCase();
-              if (
-                ["sales", "telecaller", "tellecaller"].some((k) =>
-                  roleText.includes(k)
-                )
-              ) {
-                recipientMap.set(phone, "Staff");
+          // Split by comma and clean whitespace
+          rawString
+            .split(",")
+            .map((s) => s.trim())
+            .forEach((entry) => {
+              const phoneMatch = entry.match(/\((\d+)\)/);
+              if (phoneMatch) {
+                const phone = phoneMatch[1];
+                const roleText = entry.replace(/\(\d+\)/, "").toLowerCase();
+
+                if (
+                  ["sales", "telecaller", "tellecaller"].some((k) =>
+                    roleText.includes(k)
+                  )
+                ) {
+                  // Only add if not already present (Owner might be listed as staff too)
+                  if (!recipientMap.has(phone)) {
+                    recipientMap.set(phone, { role: "Staff", email: null });
+                  }
+                }
               }
-            }
-          });
+            });
         }
       }
     } catch (e) {
@@ -51,46 +68,6 @@ const getRecipients = async (ownerDetails, projectId) => {
     }
   }
   return recipientMap;
-};
-
-/**
- * HELPER: Handles the loop of sending WhatsApp messages
- */
-const processWhatsAppQueue = async (recipientMap, templateData) => {
-  const results = [];
-  let anySent = false;
-
-  const { fullName, email, phone, subject, message } = templateData;
-  const templateVars = [
-    fullName,
-    email,
-    phone || "N/A",
-    subject || "General Inquiry",
-    message.substring(0, 100),
-  ];
-
-  for (const [targetPhone, role] of recipientMap) {
-    console.log(`\n🔄 Processing: ${role} (${targetPhone})`);
-
-    // Check History logic (using the imported Model directly for read checks)
-    const history = await ContactSubmission.findOne({
-      ownerPhone: targetPhone,
-      whatsappStatus: "SENT",
-    });
-    const templateName = history ? "new_website_lead" : "new_website_lead_hii";
-
-    const isSent = await sendWhatsAppMessage({
-      to: targetPhone,
-      templateName,
-      bodyParameters: templateVars,
-      languageCode: "en",
-    });
-
-    if (isSent) anySent = true;
-    results.push({ phone: targetPhone, status: isSent ? "SENT" : "FAILED" });
-  }
-
-  return { anySent, results };
 };
 
 export const submitContactForm = async (req, res) => {
@@ -107,74 +84,108 @@ export const submitContactForm = async (req, res) => {
       projectId,
     } = req.body;
 
-    // Log raw body for debugging
+    // Log raw body
     console.log(
       "🔹 [Controller] Request Body:",
       JSON.stringify(req.body, null, 2)
     );
 
-    // Validation
     if (!fullName || !email || !message) {
       return res
         .status(400)
         .json({ success: false, message: "Missing required fields." });
     }
 
-    // 2. RECIPIENT LOGIC (Modularized)
-    const recipientMap = await getRecipients(ownerDetails, projectId);
-
-    // 3. DB OPERATIONS (Using Service)
-    // We create the Query/Ticket first to get IDs
-    const { submission } = await createTicket({
+    // 1. CREATE TICKET (The central Query object)
+    const newQuery = await createTicket({
       fullName,
       email,
       phone,
       subject,
       message,
-      ownerEmail: ownerDetails?.email,
-      ownerPhone: ownerDetails?.phone
-        ? String(ownerDetails.phone).replace(/\D/g, "")
-        : "",
       projectId,
     });
+    console.log(`✅ Ticket Created: ${newQuery._id}`);
 
-    console.log(`✅ Ticket Created. Submission ID: ${submission._id}`);
+    // 2. GET RECIPIENTS
+    const recipientMap = await getRecipients(ownerDetails, projectId);
 
-    // 4. SEND NOTIFICATIONS
+    const whatsappResults = [];
+    let isAnySent = false;
 
-    // A. WhatsApp (Loop)
-    const waResult = await processWhatsAppQueue(recipientMap, {
-      fullName,
-      email,
-      phone,
-      subject,
-      message,
-    });
+    // 3. PROCESS NOTIFICATIONS LOOP
+    for (const [targetPhone, info] of recipientMap) {
+      console.log(`\n🔄 Processing for: ${info.role} (${targetPhone})`);
 
-    // B. Email (Single)
-    let isEmailSent = false;
-    /* try {
-       isEmailSent = await sendToEmail({ ... }); 
-    } catch(e) { console.error(e) } 
-    */
-    console.log(
-      `🔹 Email: SKIPPED | WhatsApp: ${waResult.anySent ? "SENT" : "FAILED"}`
-    );
+      // A. Create a Log Entry for this specific recipient
+      // This ensures we can track history for Sales vs Owner separately
+      const log = await createSubmissionLog({
+        queryId: newQuery._id,
+        projectId,
+        recipientPhone: targetPhone,
+        recipientEmail: info.email,
+        visitorDetails: { fullName, email, phone },
+      });
 
-    // 5. UPDATE STATUS
-    // Update the logs with the final status of the notifications
-    await updateNotificationStatus(submission._id, {
-      email: isEmailSent ? "SENT" : "SKIPPED",
-      whatsapp: waResult.anySent ? "SENT" : "FAILED",
-    });
+      // B. Check History (Using the NEW log structure)
+      const history = await ContactSubmission.findOne({
+        ownerPhone: targetPhone,
+        whatsappStatus: "SENT",
+        _id: { $ne: log._id }, // Exclude current log
+      });
 
-    // 6. RESPONSE
-    if (waResult.anySent || isEmailSent) {
+      const templateName = history
+        ? "new_website_lead"
+        : "new_website_lead_hii";
+      console.log(
+        `   👉 Template: ${templateName} (${
+          history ? "Returning" : "First Time"
+        })`
+      );
+
+      // C. Send WhatsApp
+      const templateVars = [
+        fullName,
+        email,
+        phone || "N/A",
+        subject || "General Inquiry",
+        message.substring(0, 100),
+      ];
+
+      const isWaSent = await sendWhatsAppMessage({
+        to: targetPhone,
+        templateName: templateName,
+        bodyParameters: templateVars,
+        languageCode: "en",
+      });
+
+      if (isWaSent) isAnySent = true;
+      whatsappResults.push({
+        phone: targetPhone,
+        status: isWaSent ? "SENT" : "FAILED",
+      });
+
+      // D. Send Email (Only if this recipient has an email, e.g., Owner)
+      let isEmailSent = false;
+      /* if (info.email) {
+             isEmailSent = await sendToEmail({ ... });
+        } 
+        */
+
+      // E. Update the Log Status
+      await updateNotificationStatus(log._id, {
+        email: isEmailSent ? "SENT" : "SKIPPED",
+        whatsapp: isWaSent ? "SENT" : "FAILED",
+      });
+    }
+
+    // 4. RESPONSE
+    if (isAnySent) {
       return res.status(200).json({
         success: true,
         message: "Ticket created and notifications sent.",
-        ticketId: submission.query, // Send back the Query ID for reference
-        debug: waResult.results,
+        ticketId: newQuery._id,
+        debug: whatsappResults,
       });
     } else {
       return res.status(500).json({
