@@ -5,12 +5,16 @@ const contactSubmissionSchema = new mongoose.Schema(
     fullName: { type: String, required: true },
     visitorEmail: { type: String, required: true },
     phone: { type: String },
-    subject: { type: String },
-    message: { type: String, required: true },
+ 
     ownerEmail: { type: String, required: true },
-
-    // 👇 ADDED: To track the owner's phone for the "First Time" check
     ownerPhone: { type: String, required: false },
+
+    // 👇 CHANGED: Removed subject/message, added link to Query
+    query: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Query",
+      required: true,
+    },
 
     emailStatus: {
       type: String,
@@ -23,6 +27,7 @@ const contactSubmissionSchema = new mongoose.Schema(
       enum: ["SENT", "FAILED", "PENDING"],
       default: "PENDING",
     },
+    projectId: { type: mongoose.Schema.Types.ObjectId, ref: "Project" },
   },
   { timestamps: true }
 );

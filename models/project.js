@@ -201,6 +201,8 @@ const ProjectSchema = new mongoose.Schema(
     aiAdsLocations: [String],
     userSuggestedLocation: [String],
 
+    queries: [{ type: mongoose.Schema.Types.ObjectId, ref: "Query" }],
+
     createdAt: { type: Date, default: Date.now },
   },
   {
