@@ -202,6 +202,7 @@ const ProjectSchema = new mongoose.Schema(
     userSuggestedLocation: [String],
 
     queries: [{ type: mongoose.Schema.Types.ObjectId, ref: "Query" }],
+    employees: [{ type: mongoose.Schema.Types.ObjectId, ref: "Employee" }],
 
     createdAt: { type: Date, default: Date.now },
   },

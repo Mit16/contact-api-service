@@ -22,7 +22,13 @@ export const createTicket = async ({
     message,
     projectId,
     status: "PENDING",
-    history: [{ status: "PENDING", updatedBy: "SYSTEM_INTAKE" }],
+    history: [
+      {
+        action: "CREATED",
+        note: "Ticket received from website",
+        updatedBy: "SYSTEM",
+      },
+    ],
   });
 
   await newQuery.save();
@@ -46,6 +52,7 @@ export const createSubmissionLog = async ({
   projectId,
   recipientPhone,
   recipientEmail,
+  recipientRole, // "Owner", "Sales", etc.
   visitorDetails,
 }) => {
   const log = new ContactSubmission({
@@ -54,13 +61,20 @@ export const createSubmissionLog = async ({
     phone: visitorDetails.phone,
     query: queryId,
     projectId: projectId,
-    ownerPhone: recipientPhone, // Used for History Check
+    ownerPhone: recipientPhone,
     ownerEmail: recipientEmail || "staff-notification",
+    recipientRole: recipientRole, // 👇 Saving it here
     emailStatus: "PENDING",
     whatsappStatus: "PENDING",
   });
 
   await log.save();
+
+  // Link this log back to the Query (so we know who was notified)
+  await Query.findByIdAndUpdate(queryId, {
+    $push: { submissions: log._id },
+  });
+
   return log;
 };
 

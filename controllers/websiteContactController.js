@@ -1,5 +1,3 @@
-import Project from "../models/project.js";
-import Intake from "../models/qa.js";
 import ContactSubmission from "../models/contactSubmission.js";
 import { sendWhatsAppMessage } from "../services/whatsappService.js";
 // 👇 IMPORTED CORRECTLY
@@ -8,63 +6,62 @@ import {
   createSubmissionLog,
   updateNotificationStatus,
 } from "../services/queryService.js";
+import Employee from "../models/employee.js";
 // import { sendToEmail } from "../utils/emailService.js";
 
 /**
- * HELPER: Extracts Owner + Staff recipients from Project/Intake
+ * HELPER: Fetch Recipients (Owner + Relevant Employees)
  */
 const getRecipients = async (ownerDetails, projectId) => {
   const recipientMap = new Map();
 
-  // 1. Add Owner (Primary)
+  // 1. Add Main Business Owner (Always included)
   if (ownerDetails?.phone) {
     const cleanPhone = String(ownerDetails.phone).replace(/\D/g, "");
-    if (cleanPhone.length >= 10)
+    if (cleanPhone.length >= 10) {
       recipientMap.set(cleanPhone, {
         role: "Business Owner",
         email: ownerDetails.email,
       });
+    }
   }
 
-  // 2. Parse Intake for Staff
+  // 2. Fetch Employees from DB (Sales & Telecallers)
   if (projectId) {
     try {
-      const project = await Project.findById(projectId);
-      if (project?.latestIntake) {
-        const intake = await Intake.findById(project.latestIntake);
-        const rawString =
-          intake?.formData?.[
-            "What are the names of the partners, and what roles do they play?"
-          ];
+      // Find employees linked to this project with specific roles
+      const staff = await Employee.find({
+        project: projectId,
+        isActive: true,
+        // Case-insensitive check for roles
+        role: {
+          $in: [
+            /^Sales$/i,
+            /^Telecaller$/i,
+            /^Sales Executive$/i,
+            /^Manager$/i,
+          ],
+        },
+      });
 
-        if (typeof rawString === "string") {
-          console.log(`🔹 [Helper] Parsing Intake: "${rawString}"`);
-          // Split by comma and clean whitespace
-          rawString
-            .split(",")
-            .map((s) => s.trim())
-            .forEach((entry) => {
-              const phoneMatch = entry.match(/\((\d+)\)/);
-              if (phoneMatch) {
-                const phone = phoneMatch[1];
-                const roleText = entry.replace(/\(\d+\)/, "").toLowerCase();
+      console.log(
+        `🔹 [Helper] Found ${staff.length} staff members for notification.`
+      );
 
-                if (
-                  ["sales", "telecaller", "tellecaller"].some((k) =>
-                    roleText.includes(k)
-                  )
-                ) {
-                  // Only add if not already present (Owner might be listed as staff too)
-                  if (!recipientMap.has(phone)) {
-                    recipientMap.set(phone, { role: "Staff", email: null });
-                  }
-                }
-              }
+      staff.forEach((emp) => {
+        if (emp.phone) {
+          const empPhone = String(emp.phone).replace(/\D/g, "");
+          // Avoid duplicates (if Owner is also listed as Employee)
+          if (!recipientMap.has(empPhone)) {
+            recipientMap.set(empPhone, {
+              role: emp.role,
+              email: emp.email, // We capture email but won't send for now as requested
             });
+          }
         }
-      }
+      });
     } catch (e) {
-      console.warn("⚠️ [Helper] Intake Parse Error:", e.message);
+      console.warn("⚠️ [Helper] Employee Fetch Error:", e.message);
     }
   }
   return recipientMap;
@@ -117,13 +114,13 @@ export const submitContactForm = async (req, res) => {
     for (const [targetPhone, info] of recipientMap) {
       console.log(`\n🔄 Processing for: ${info.role} (${targetPhone})`);
 
-      // A. Create a Log Entry for this specific recipient
-      // This ensures we can track history for Sales vs Owner separately
+      // A. Create Log (To track individual history)
       const log = await createSubmissionLog({
         queryId: newQuery._id,
         projectId,
         recipientPhone: targetPhone,
         recipientEmail: info.email,
+        recipientRole: info.role,
         visitorDetails: { fullName, email, phone },
       });
 

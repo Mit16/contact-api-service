@@ -18,6 +18,9 @@ const contactSubmissionSchema = new mongoose.Schema(
     ownerEmail: { type: String, required: false }, // Made optional for staff notifications
     ownerPhone: { type: String, required: false }, // Key for WhatsApp history
 
+    // 👇 ADDED: To track if this msg went to "Owner", "Sales", or "Telecaller"
+    recipientRole: { type: String, default: "Staff" },
+
     emailStatus: {
       type: String,
       enum: ["SENT", "PENDING", "FAILED", "SKIPPED"],
