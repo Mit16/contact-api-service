@@ -10,15 +10,42 @@ import Employee from "../models/employee.js";
 // import { sendToEmail } from "../utils/emailService.js";
 
 /**
+ * 🛠️ HELPER: Robust Phone Number Sanitizer
+ * - Removes non-digits
+ * - Removes leading '0'
+ * - Adds '91' (India) default if missing on 10-digit numbers
+ */
+const sanitizePhoneNumber = (phone) => {
+  if (!phone) return null;
+  let p = String(phone).replace(/\D/g, ""); // Remove + - ( ) spaces
+
+  // Handle leading 0 (Common in India: 098...) -> 98...
+  if (p.startsWith("0")) {
+    p = p.substring(1);
+  }
+
+  // If length is 10, assume India and prepend 91
+  if (p.length === 10) {
+    p = "91" + p;
+  }
+
+  // Validate: WhatsApp usually requires 12 digits for India (91 + 10 digits)
+  // or generally > 10 digits for intl.
+  if (p.length < 10) return null;
+
+  return p;
+};
+
+/**
  * HELPER: Fetch Recipients (Owner + Relevant Employees)
  */
 const getRecipients = async (ownerDetails, projectId) => {
   const recipientMap = new Map();
 
-  // 1. Add Main Business Owner (Always included)
+  // 1. Add Main Business Owner
   if (ownerDetails?.phone) {
-    const cleanPhone = String(ownerDetails.phone).replace(/\D/g, "");
-    if (cleanPhone.length >= 10) {
+    const cleanPhone = sanitizePhoneNumber(ownerDetails.phone);
+    if (cleanPhone) {
       recipientMap.set(cleanPhone, {
         role: "Business Owner",
         email: ownerDetails.email,
@@ -26,38 +53,28 @@ const getRecipients = async (ownerDetails, projectId) => {
     }
   }
 
-  // 2. Fetch Employees from DB (Sales & Telecallers)
+  // 2. Fetch Employees from DB (Strictly Sales & Telecallers)
   if (projectId) {
     try {
-      // Find employees linked to this project with specific roles
       const staff = await Employee.find({
         project: projectId,
         isActive: true,
-        // Case-insensitive check for roles
-        role: {
-          $in: [
-            /^Sales$/i,
-            /^Telecaller$/i,
-            /^Sales Executive$/i,
-            /^Manager$/i,
-          ],
-        },
+        // 👇 FIXED: Strictly look for Sales or Telecaller variants (Case Insensitive)
+        // This Regex matches "Sales", "Sales Executive", "Telecaller", "Tellecaller"
+        role: { $in: [/Sales/i, /Telecaller/i, /Tellecaller/i] },
       });
 
-      console.log(
-        `🔹 [Helper] Found ${staff.length} staff members for notification.`
-      );
+      console.log(`🔹 [Helper] Found ${staff.length} eligible staff members.`);
 
       staff.forEach((emp) => {
-        if (emp.phone) {
-          const empPhone = String(emp.phone).replace(/\D/g, "");
-          // Avoid duplicates (if Owner is also listed as Employee)
-          if (!recipientMap.has(empPhone)) {
-            recipientMap.set(empPhone, {
-              role: emp.role,
-              email: emp.email, // We capture email but won't send for now as requested
-            });
-          }
+        const empPhone = sanitizePhoneNumber(emp.phone);
+
+        // Only add if we have a valid phone and it's not already in the list
+        if (empPhone && !recipientMap.has(empPhone)) {
+          recipientMap.set(empPhone, {
+            role: emp.role, // e.g., "Sales", "Telecaller"
+            email: emp.email,
+          });
         }
       });
     } catch (e) {
@@ -185,9 +202,12 @@ export const submitContactForm = async (req, res) => {
         debug: whatsappResults,
       });
     } else {
-      return res.status(500).json({
-        success: false,
-        message: "Ticket created but notifications failed.",
+      return res.status(200).json({
+        success: true,
+        message:
+          "Ticket created (Notifications failed or no eligible recipients).",
+        ticketId: newQuery._id,
+        debug: whatsappResults,
       });
     }
   } catch (error) {
